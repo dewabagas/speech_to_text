@@ -512,7 +512,12 @@ public class SpeechToTextPlugin: NSObject, FlutterPlugin {
         if sampleRate > 0 {
           try self.audioSession.setPreferredSampleRate(Double(sampleRate))
         }
-        try self.audioSession.setMode(AVAudioSession.Mode.default)
+        // `.voiceChat` engages Voice-Processing I/O — automatic gain control,
+        // noise suppression and echo cancellation. `.default` leaves the
+        // microphone unprocessed, which makes normal-volume speech read as too
+        // quiet to recognise. Must be set before `initAudioEngine()` below:
+        // voice processing is selected when the input node is configured.
+        try self.audioSession.setMode(AVAudioSession.Mode.voiceChat)
         try self.audioSession.setActive(true, options: .notifyOthersOnDeactivation)
         if #available(iOS 13.0, *) {
           try self.audioSession.setAllowHapticsAndSystemSoundsDuringRecording(enableHaptics)
