@@ -283,7 +283,11 @@ public class SpeechToTextPlugin :
             }
         }
         speechStartTime = System.currentTimeMillis()
-        notifyListening(isRecording = true)
+        // Re-entrancy guard only. The `listening` STATUS is sent from
+        // onReadyForSpeech: `handler` is the main looper, so the startListening
+        // above cannot even run until this method returns, and notifying here
+        // reported "listening" before the recognizer had been asked to start.
+        listening = true
         result.success(true)
         debugLog("Start listening done")
     }
@@ -753,7 +757,16 @@ public class SpeechToTextPlugin :
         }
     }
 
-    override fun onReadyForSpeech(p0: Bundle?) {}
+    override fun onReadyForSpeech(p0: Bundle?) {
+        // The recognizer's audio pipeline is up and the user may speak. This is
+        // the real milestone the `listening` status should mean; callers that
+        // cue a user on it were previously cueing a microphone still binding to
+        // the out-of-process RecognitionService.
+        if (!listening) return
+        debugLog("Notify status:" + SpeechToTextStatus.listening.name)
+        channel?.invokeMethod(SpeechToTextCallbackMethods.notifyStatus.name,
+                SpeechToTextStatus.listening.name)
+    }
     override fun onBufferReceived(p0: ByteArray?) {}
     override fun onEvent(p0: Int, p1: Bundle?) {}
     override fun onBeginningOfSpeech() {}
