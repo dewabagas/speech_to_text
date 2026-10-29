@@ -725,33 +725,43 @@ extension SpeechToTextPlugin: SFSpeechRecognitionTaskDelegate {
     // Do nothing for now
   }
 
+  /// Task callbacks arrive on the recognizer's queue (main by default) and can
+  /// trail their task: a stopped task's final result may land after the next
+  /// listen began, and Flutter would take it as that session's. Only the live
+  /// task's are passed on, checked on the queue where `currentTask` changes.
+  private func onLiveTask(_ task: SFSpeechRecognitionTask, _ body: @escaping () -> Void) {
+    engineQueue.async { [self] in
+      guard task === currentTask else { return }
+      body()
+    }
+  }
+
   public func speechRecognitionTaskFinishedReadingAudio(_ task: SFSpeechRecognitionTask) {
-    reportError(source: "FinishedReadingAudio", error: task.error)
-    os_log("Finished reading audio", log: pluginLog, type: .debug)
-    invokeFlutter(
-      SwiftSpeechToTextCallbackMethods.notifyStatus,
-      arguments: SpeechToTextStatus.notListening.rawValue)
+    onLiveTask(task) { [self] in
+      reportError(source: "FinishedReadingAudio", error: task.error)
+      os_log("Finished reading audio", log: pluginLog, type: .debug)
+      invokeFlutter(
+        SwiftSpeechToTextCallbackMethods.notifyStatus,
+        arguments: SpeechToTextStatus.notListening.rawValue)
+    }
   }
 
   public func speechRecognitionTaskWasCancelled(_ task: SFSpeechRecognitionTask) {
-    reportError(source: "TaskWasCancelled", error: task.error)
-    os_log("Canceled reading audio", log: pluginLog, type: .debug)
-    invokeFlutter(
-      SwiftSpeechToTextCallbackMethods.notifyStatus,
-      arguments: SpeechToTextStatus.notListening.rawValue)
+    onLiveTask(task) { [self] in
+      reportError(source: "TaskWasCancelled", error: task.error)
+      os_log("Canceled reading audio", log: pluginLog, type: .debug)
+      invokeFlutter(
+        SwiftSpeechToTextCallbackMethods.notifyStatus,
+        arguments: SpeechToTextStatus.notListening.rawValue)
+    }
   }
 
   public func speechRecognitionTask(
     _ task: SFSpeechRecognitionTask, didFinishSuccessfully successfully: Bool
   ) {
-    // Arrives on the recognizer's queue, the main one by default. The teardown
-    // below must not run there (it froze Flutter's frames for seconds), and a
-    // stopped or cancelled task reports here after its own teardown already
-    // ran: only the live task's end is news.
-    engineQueue.async { [self] in
-      guard task === currentTask else { return }
-      finishTask(task, successfully: successfully)
-    }
+    // The teardown in finishTask must not run on main either: it froze
+    // Flutter's frames for seconds.
+    onLiveTask(task) { [self] in finishTask(task, successfully: successfully) }
   }
 
   private func finishTask(_ task: SFSpeechRecognitionTask, successfully: Bool) {
@@ -812,25 +822,30 @@ extension SpeechToTextPlugin: SFSpeechRecognitionTaskDelegate {
   public func speechRecognitionTask(
     _ task: SFSpeechRecognitionTask, didHypothesizeTranscription transcription: SFTranscription
   ) {
-    os_log("HypothesizeTranscription", log: pluginLog, type: .debug)
-    reportError(source: "HypothesizeTranscription", error: task.error)
+    onLiveTask(task) { [self] in
+      os_log("HypothesizeTranscription", log: pluginLog, type: .debug)
+      reportError(source: "HypothesizeTranscription", error: task.error)
       handleResult([transcription], isFinal: false, maybeFinal: false)
+    }
   }
 
   public func speechRecognitionTask(
     _ task: SFSpeechRecognitionTask,
     didFinishRecognition recognitionResult: SFSpeechRecognitionResult
   ) {
-    reportError(source: "FinishRecognition", error: task.error)
-    os_log(
-      "FinishRecognition %{PUBLIC}@", log: pluginLog, type: .debug,
-      recognitionResult.isFinal.description)
-    var pseudoFinal = false
+    onLiveTask(task) { [self] in
+      reportError(source: "FinishRecognition", error: task.error)
+      os_log(
+        "FinishRecognition %{PUBLIC}@", log: pluginLog, type: .debug,
+        recognitionResult.isFinal.description)
+      var pseudoFinal = false
       if #available(iOS 14.0, macOS 13.0, *) {
-          pseudoFinal = recognitionResult.speechRecognitionMetadata != nil
+        pseudoFinal = recognitionResult.speechRecognitionMetadata != nil
       }
-    let isFinal = recognitionResult.isFinal
-      handleResult(recognitionResult.transcriptions, isFinal: isFinal, maybeFinal: pseudoFinal )
+      handleResult(
+        recognitionResult.transcriptions, isFinal: recognitionResult.isFinal,
+        maybeFinal: pseudoFinal)
+    }
   }
 
   private func reportError(source: String, error: Error?) {
