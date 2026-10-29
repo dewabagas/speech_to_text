@@ -85,6 +85,13 @@ public class SpeechToTextPlugin: NSObject, FlutterPlugin {
   #if os(iOS)
     private var rememberedAudioCategory: AVAudioSession.Category?
     private var rememberedAudioCategoryOptions: AVAudioSession.CategoryOptions?
+    private var rememberedAudioMode: AVAudioSession.Mode?
+    /// The category and options listen() sets for recording.
+    private let recordOptions: AVAudioSession.CategoryOptions =
+      [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP, .mixWithOthers]
+    /// The app had already set the session up for recording when listen()
+    /// started, so the app owns it: the teardown leaves it active.
+    private var sessionHeldByApp = false
     private let audioSession = AVAudioSession.sharedInstance()
   #endif
 
@@ -424,25 +431,40 @@ public class SpeechToTextPlugin: NSObject, FlutterPlugin {
         "Error removing trap: %{PUBLIC}@", log: pluginLog, type: .error, error.localizedDescription)
     }
     #if os(iOS)
-      do {
-        if let rememberedAudioCategory = rememberedAudioCategory,
-          let rememberedAudioCategoryOptions = rememberedAudioCategoryOptions
-        {
-          try self.audioSession.setCategory(
-            rememberedAudioCategory, options: rememberedAudioCategoryOptions)
+      if sessionHeldByApp {
+        // Only the mode is ours to undo. Deactivating would rebuild the audio
+        // device, stalling every player meanwhile (2.7 s on the simulator),
+        // and the next listen would pay the same again to reactivate.
+        if let mode = rememberedAudioMode, audioSession.mode != mode {
+          do {
+            try audioSession.setMode(mode)
+          } catch {
+            os_log(
+              "Error restoring mode: %{PUBLIC}@", log: pluginLog, type: .error,
+              error.localizedDescription)
+          }
         }
-      } catch {
-        os_log(
-          "Error stopping listen: %{PUBLIC}@", log: pluginLog, type: .error,
-          error.localizedDescription)
+      } else {
+        do {
+          if let rememberedAudioCategory = rememberedAudioCategory,
+            let rememberedAudioCategoryOptions = rememberedAudioCategoryOptions
+          {
+            try self.audioSession.setCategory(
+              rememberedAudioCategory, options: rememberedAudioCategoryOptions)
+          }
+        } catch {
+          os_log(
+            "Error stopping listen: %{PUBLIC}@", log: pluginLog, type: .error,
+            error.localizedDescription)
+        }
+        do {
+          try self.audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+        } catch {
+          os_log(
+            "Error deactivation: %{PUBLIC}@", log: pluginLog, type: .info,
+            error.localizedDescription)
+        }
       }
-      do {
-        try self.audioSession.setActive(false, options: .notifyOthersOnDeactivation)
-      } catch {
-        os_log(
-          "Error deactivation: %{PUBLIC}@", log: pluginLog, type: .info, error.localizedDescription)
-      }
-
     #endif
     self.invokeFlutter(
       SwiftSpeechToTextCallbackMethods.notifyStatus, arguments: SpeechToTextStatus.done.rawValue)
@@ -491,9 +513,12 @@ public class SpeechToTextPlugin: NSObject, FlutterPlugin {
       #if os(iOS)
         rememberedAudioCategory = self.audioSession.category
         rememberedAudioCategoryOptions = self.audioSession.categoryOptions
+        rememberedAudioMode = self.audioSession.mode
+        sessionHeldByApp =
+          rememberedAudioCategory == .playAndRecord
+          && self.audioSession.categoryOptions.isSuperset(of: recordOptions)
         try self.audioSession.setCategory(
-          AVAudioSession.Category.playAndRecord,
-          options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP, .mixWithOthers])
+          AVAudioSession.Category.playAndRecord, options: recordOptions)
         //            try self.audioSession.setMode(AVAudioSession.Mode.measurement)
         if sampleRate > 0 {
           try self.audioSession.setPreferredSampleRate(Double(sampleRate))
