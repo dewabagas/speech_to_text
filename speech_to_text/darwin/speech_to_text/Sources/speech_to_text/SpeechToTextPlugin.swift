@@ -95,6 +95,11 @@ public class SpeechToTextPlugin: NSObject, FlutterPlugin {
   private var onDeviceStatus: Bool = false
   private var listening = false
   private var stopping = false
+  /// Every engine transition (listen, stop, cancel, and the teardown after a
+  /// task ends on its own) runs here: off the main thread, which Flutter 3.29+
+  /// shares with Dart, so AVAudioSession/AVAudioEngine work can't freeze its
+  /// frames; and one at a time, so a teardown can't land in a starting engine.
+  private let engineQueue = DispatchQueue(label: "com.csdcorp.speechToText.engine")
   private var audioEngine: AVAudioEngine?
   private var inputNode: AVAudioInputNode?
   private var aggregateResults: SpeechResultAggregator = SpeechResultAggregator()
@@ -170,35 +175,16 @@ public class SpeechToTextPlugin: NSObject, FlutterPlugin {
         }
         return
       }
-        if #available(iOS 13.0, *) {
-            Task {
-                listenForSpeech(
-                    result, localeStr: localeStr, partialResults: partialResults, onDevice: onDevice,
-                    listenMode: listenMode, sampleRate: sampleRate, autoPunctuation: autoPunctuation,
-                    enableHaptics: enableHaptics)
-            }
-        } else {
-            listenForSpeech(
+        engineQueue.async {
+            self.listenForSpeech(
                 result, localeStr: localeStr, partialResults: partialResults, onDevice: onDevice,
                 listenMode: listenMode, sampleRate: sampleRate, autoPunctuation: autoPunctuation,
                 enableHaptics: enableHaptics)
         }
     case SwiftSpeechToTextMethods.stop.rawValue:
-        if #available(iOS 13.0, *) {
-            Task {
-                stopSpeech(result)
-            }
-        } else {
-            stopSpeech(result)
-        }
+        engineQueue.async { self.stopSpeech(result) }
     case SwiftSpeechToTextMethods.cancel.rawValue:
-        if #available(iOS 13.0, *) {
-            Task {
-                cancelSpeech(result)
-            }
-        } else {
-            cancelSpeech(result)
-        }
+        engineQueue.async { self.cancelSpeech(result) }
     case SwiftSpeechToTextMethods.locales.rawValue:
         if #available(iOS 13.0, *) {
             Task {
@@ -758,6 +744,17 @@ extension SpeechToTextPlugin: SFSpeechRecognitionTaskDelegate {
   public func speechRecognitionTask(
     _ task: SFSpeechRecognitionTask, didFinishSuccessfully successfully: Bool
   ) {
+    // Arrives on the recognizer's queue, the main one by default. The teardown
+    // below must not run there (it froze Flutter's frames for seconds), and a
+    // stopped or cancelled task reports here after its own teardown already
+    // ran: only the live task's end is news.
+    engineQueue.async { [self] in
+      guard task === currentTask else { return }
+      finishTask(task, successfully: successfully)
+    }
+  }
+
+  private func finishTask(_ task: SFSpeechRecognitionTask, successfully: Bool) {
     reportError(source: "FinishSuccessfully", error: task.error)
     os_log("FinishSuccessfully", log: pluginLog, type: .debug)
     if !successfully {
@@ -802,7 +799,8 @@ extension SpeechToTextPlugin: SFSpeechRecognitionTaskDelegate {
     if !stopping {
       if let sound = successfully ? successSound : cancelSound {
         onPlayEnd = { () -> Void in
-          self.stopCurrentListen()
+          // The player calls this on main.
+          self.engineQueue.async { self.stopCurrentListen() }
         }
         sound.play()
       } else {
